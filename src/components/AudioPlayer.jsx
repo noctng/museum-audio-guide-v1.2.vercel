@@ -2,19 +2,20 @@
 
 import React, { useState, useRef, useEffect, useCallback } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { Play, Pause, RotateCcw, ArrowLeft, AlertCircle, Home, QrCode as QrCodeIcon, User, Clock, LogOut } from 'lucide-react';
-import { Button } from '@/components/ui/button';
-import { Card, CardContent } from '@/components/ui/card';
-import { Progress } from '@/components/ui/progress';
-import { Alert, AlertDescription } from '@/components/ui/alert';
-import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { Play, Pause, RotateCcw, ArrowLeft, AlertCircle, Home, QrCode as QrCodeIcon } from 'lucide-react';
+import { Button } from './ui/button';
+import { Card, CardContent } from './ui/card';
+import { Progress } from './ui/progress';
+import { Alert, AlertDescription } from './ui/alert';
+import { Dialog, DialogContent, DialogHeader, DialogTitle } from "./ui/dialog";
 import QrScanner from './QrScanner';
+import { supabase } from '../lib/supabaseClient';
 
 // ================================================================
 // Component Con 1: Header (Phần tĩnh)
 // React.memo sẽ ngăn component này re-render không cần thiết.
 // ================================================================
-const PlayerHeader = React.memo(({ language, onBackToHome, onBack, onArtifactSubmit, visitorSession, onLogout }) => {
+const PlayerHeader = React.memo(({ language, onBackToHome, onBack, onArtifactSubmit }) => {
   const [isScannerOpen, setIsScannerOpen] = useState(false);
 
   const handleScanSuccess = useCallback((decodedText) => {
@@ -28,51 +29,23 @@ const PlayerHeader = React.memo(({ language, onBackToHome, onBack, onArtifactSub
 
   const languageNames = { en: 'English', vi: 'Tiếng Việt', zh: '中文', ru: 'Русский', ko: '한국어', ja: '日本語', fr: 'Français', de: 'Deutsch' };
 
-  const expiresDate = visitorSession?.expires_at ? new Date(visitorSession.expires_at) : null;
-  const formattedExpires = expiresDate?.toLocaleString('en-GB', {
-    hour: '2-digit', minute: '2-digit'
-  });
-
-
   return (
-     <div className="mb-8">
-      {/* Top row for visitor info */}
-      {visitorSession && (
-        <div className="flex justify-between items-center text-sm text-slate-600 mb-4 px-4 py-2 bg-slate-100/80 backdrop-blur-sm rounded-full">
-          <div className="flex items-center gap-4">
-            <div className="flex items-center gap-2">
-              <User className="w-4 h-4" />
-              <span className="font-medium">{visitorSession.name}</span>
-            </div>
-            <div className="hidden sm:flex items-center gap-2">
-              <Clock className="w-4 h-4" />
-              <span>Expires at {formattedExpires}</span>
-            </div>
-          </div>
-          <Button variant="ghost" size="sm" onClick={onLogout}>
-            <LogOut className="w-4 h-4 mr-2" /> Logout
+    <div className="flex items-center justify-between mb-8">
+      <div className="flex items-center gap-2">
+        <Button variant="ghost" onClick={onBackToHome}><Home className="w-4 h-4 mr-2" /> Home</Button>
+        <Button variant="ghost" onClick={onBack}><ArrowLeft className="w-4 h-4 mr-2" /> Back</Button>
+        <Dialog open={isScannerOpen} onOpenChange={setIsScannerOpen}>
+          <Button as="button" variant="ghost" onClick={() => setIsScannerOpen(true)}>
+            <QrCodeIcon className="w-4 h-4 mr-2" /> Scan QR
           </Button>
-        </div>
-      )}
-
-      {/* Bottom row for navigation */}
-      <div className="flex items-center justify-between">
-        <div className="flex items-center gap-2">
-          <Button variant="ghost" onClick={onBackToHome}><Home className="w-4 h-4 mr-2" /> Home</Button>
-          <Button variant="ghost" onClick={onBack}><ArrowLeft className="w-4 h-4 mr-2" /> Back</Button>
-          <Dialog open={isScannerOpen} onOpenChange={setIsScannerOpen}>
-            <Button as="button" variant="ghost" onClick={() => setIsScannerOpen(true)}>
-              <QrCodeIcon className="w-4 h-4 mr-2" /> Scan QR
-            </Button>
-            <DialogContent>
-              <DialogHeader><DialogTitle>Scan Artifact QR Code</DialogTitle></DialogHeader>
-              {isScannerOpen && <QrScanner onScanSuccess={handleScanSuccess} onScanError={handleScanError} />}
-            </DialogContent>
-          </Dialog>
-        </div>
-        <div className="flex items-center gap-2 px-4 py-2 bg-amber-100 rounded-full">
-          <span className="text-amber-800 font-medium">{languageNames[language]}</span>
-        </div>
+          <DialogContent>
+            <DialogHeader><DialogTitle>Scan Artifact QR Code</DialogTitle></DialogHeader>
+            {isScannerOpen && <QrScanner onScanSuccess={handleScanSuccess} onScanError={handleScanError} />}
+          </DialogContent>
+        </Dialog>
+      </div>
+      <div className="flex items-center gap-2 px-4 py-2 bg-amber-100 rounded-full">
+        <span className="text-amber-800 font-medium">{languageNames[language]}</span>
       </div>
     </div>
   );
@@ -118,8 +91,6 @@ export default function AudioPlayer({
   artifactData,
   onBackToHome,
   onArtifactSubmit,
-  visitorSession,
-  onLogout,
 }) {
   const [isPlaying, setIsPlaying] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
@@ -127,8 +98,47 @@ export default function AudioPlayer({
   const [audioError, setAudioError] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
   const audioRef = useRef(null);
+  
+  // Ref để đảm bảo chỉ đếm 1 lần mỗi session nghe
+  const hasCountedRef = useRef(false);
 
   const audioUrl = artifactData?.audio_urls?.[language] || null;
+
+  // Hàm tăng lượt nghe
+  const incrementListenCount = useCallback(async () => {
+    if (!artifactData?.id || !language || hasCountedRef.current) return;
+
+    try {
+      hasCountedRef.current = true; // Đánh dấu đã đếm
+
+      // 1. Lấy dữ liệu hiện tại
+      const { data, error: fetchError } = await supabase
+        .from('AudioGuide')
+        .select('listen_counts')
+        .eq('id', artifactData.id)
+        .single();
+
+      if (fetchError) throw fetchError;
+
+      const currentCounts = data?.listen_counts || {};
+      const newCount = (currentCounts[language] || 0) + 1;
+
+      // 2. Cập nhật số liệu mới
+      const { error: updateError } = await supabase
+        .from('AudioGuide')
+        .update({
+          listen_counts: { ...currentCounts, [language]: newCount }
+        })
+        .eq('id', artifactData.id);
+
+      if (updateError) throw updateError;
+      
+      console.log(`Recorded listen for ${language}. Total: ${newCount}`);
+
+    } catch (err) {
+      console.error("Failed to update listen count:", err);
+    }
+  }, [artifactData?.id, language]);
 
   useEffect(() => {
     const audio = audioRef.current;
@@ -140,6 +150,9 @@ export default function AudioPlayer({
     setDuration(0);
     setIsPlaying(false);
     
+    // Reset trạng thái đếm khi đổi bài hoặc ngôn ngữ
+    hasCountedRef.current = false;
+    
     audio.src = audioUrl;
     if (audioUrl) audio.load();
     else { setAudioError(true); setIsLoading(false); }
@@ -148,6 +161,12 @@ export default function AudioPlayer({
       setDuration(audio.duration); setIsLoading(false); setAudioError(false);
       audio.play().then(() => setIsPlaying(true)).catch(() => setIsPlaying(false));
     };
+    
+    // Thêm sự kiện play để đếm lượt nghe
+    const handlePlay = () => {
+        incrementListenCount();
+    };
+
     const handleTimeUpdate = () => setCurrentTime(audio.currentTime);
     const handleError = () => { setAudioError(true); setIsLoading(false); };
     const handleEnded = () => { setIsPlaying(false); setCurrentTime(0); };
@@ -156,14 +175,16 @@ export default function AudioPlayer({
     audio.addEventListener('timeupdate', handleTimeUpdate);
     audio.addEventListener('error', handleError);
     audio.addEventListener('ended', handleEnded);
+    audio.addEventListener('play', handlePlay); // Listener mới
 
     return () => {
       audio.removeEventListener('loadedmetadata', handleLoadedMetadata);
       audio.removeEventListener('timeupdate', handleTimeUpdate);
       audio.removeEventListener('error', handleError);
       audio.removeEventListener('ended', handleEnded);
+      audio.removeEventListener('play', handlePlay); // Cleanup listener
     };
-  }, [audioUrl]);
+  }, [audioUrl, incrementListenCount]);
 
   const togglePlayPause = useCallback(() => {
     const audio = audioRef.current;
@@ -198,8 +219,6 @@ export default function AudioPlayer({
             onBackToHome={onBackToHome}
             onBack={onBack}
             onArtifactSubmit={onArtifactSubmit}
-            visitorSession={visitorSession}
-            onLogout={onLogout}
           />
 
           {artifactData?.image_url && (
